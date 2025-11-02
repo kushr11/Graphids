@@ -2,9 +2,11 @@
 This script provides an exmaple to wrap UER-py for classification.
 """
 import random
+import os
 import argparse
 import torch
 import torch.nn as nn
+import time
 from uer.layers import *
 from uer.encoders import *
 from uer.utils.vocab import Vocab
@@ -82,7 +84,13 @@ def count_labels_num(path):
 def load_or_initialize_parameters(args, model):
     if args.pretrained_model_path is not None:
         # Initialize with pretrained model.
-        model.load_state_dict(torch.load(args.pretrained_model_path, map_location={'cuda:1':'cuda:0', 'cuda:2':'cuda:0', 'cuda:3':'cuda:0'}), strict=False)
+        model.load_state_dict(torch.load(args.pretrained_model_path, map_location='cuda:0'), strict=False)
+        #print model specific information : model size, model architecture
+        # total_params = 0
+        # for param in model.parameters():
+        #     total_params += np.prod(list(param.data.size()))
+        # print("Total parameters: {}".format(total_params))  
+
     else:
         # Initialize with normal distribution.
         for n, p in list(model.named_parameters()):
@@ -114,6 +122,7 @@ def build_optimizer(args, model):
 def batch_loader(batch_size, src, tgt, seg, soft_tgt=None):
     instances_num = src.size()[0]
     for i in range(instances_num // batch_size):
+        # print(f"Batch size: {batch_size}, Total instances: {instances_num}")
         src_batch = src[i * batch_size : (i + 1) * batch_size, :]
         tgt_batch = tgt[i * batch_size : (i + 1) * batch_size]
         seg_batch = seg[i * batch_size : (i + 1) * batch_size, :]
@@ -166,8 +175,28 @@ def read_dataset(args, path):
                 dataset.append((src, tgt, seg, soft_tgt))
             else:
                 dataset.append((src, tgt, seg))
-
+    
+    # torch.save((src, tgt, seg, soft_tgt), "processed_ft_dataset.pt")
+    # print(type(src), type(tgt), type(seg), type(soft_tgt))
+    # print(src[:5], tgt, seg[:5], soft_tgt[:5])
     return dataset
+
+# 在 read_dataset 最后（或单独写一个 preprocess 函数）：
+def save_dataset_as_tensors(dataset, save_path):
+    src_list = [d[0] for d in dataset]
+    tgt_list = [d[1] for d in dataset]
+    seg_list = [d[2] for d in dataset]
+    
+    src_tensor = torch.tensor(src_list, dtype=torch.long)      # [N, seq_len]
+    tgt_tensor = torch.tensor(tgt_list, dtype=torch.long)      # [N]
+    seg_tensor = torch.tensor(seg_list, dtype=torch.long)      # [N, seq_len]
+    
+    if len(dataset[0]) == 4:  # 有 soft targets
+        soft_list = [d[3] for d in dataset]
+        soft_tensor = torch.tensor(soft_list, dtype=torch.float)  # [N, labels_num]
+        torch.save((src_tensor, tgt_tensor, seg_tensor, soft_tensor), save_path)
+    else:
+        torch.save((src_tensor, tgt_tensor, seg_tensor), save_path)
 
 
 def train_model(args, model, optimizer, scheduler, src_batch, tgt_batch, seg_batch, soft_tgt_batch=None):
@@ -207,8 +236,10 @@ def evaluate(args, dataset, print_confusion_matrix=False):
     confusion = torch.zeros(args.labels_num, args.labels_num, dtype=torch.long)
 
     args.model.eval()
+    start=time.time()
+    for i, (src_batch, tgt_batch, seg_batch, soft_tgt_batch) in enumerate(batch_loader(batch_size, src, tgt, seg)):
 
-    for i, (src_batch, tgt_batch, seg_batch, _) in enumerate(batch_loader(batch_size, src, tgt, seg)):
+    # for i, (src_batch, tgt_batch, seg_batch, _) in enumerate(batch_loader(batch_size, src, tgt, seg)):
         src_batch = src_batch.to(args.device)
         tgt_batch = tgt_batch.to(args.device)
         seg_batch = seg_batch.to(args.device)
@@ -237,7 +268,9 @@ def evaluate(args, dataset, print_confusion_matrix=False):
             else:
                 f1 = 2 * p * r / (p + r)
             print("Label {}: {:.3f}, {:.3f}, {:.3f}".format(i, p, r, f1))
-
+    end=time.time()
+    print("Evaluation time: {:.2f} seconds".format(end-start))
+    print("Evaluationtime per instance: {:.4f} seconds".format((end-start)/len(dataset)))
     print("Acc. (Correct/Total): {:.4f} ({}/{}) ".format(correct / len(dataset), correct, len(dataset)))
     return correct / len(dataset), confusion
 
@@ -285,19 +318,54 @@ def main():
     model = model.to(args.device)
 
     # Training phase.
-    trainset = read_dataset(args, args.train_path)
-    random.shuffle(trainset)
-    instances_num = len(trainset)
-    batch_size = args.batch_size
-    
-    src = torch.LongTensor([example[0] for example in trainset])
-    tgt = torch.LongTensor([example[1] for example in trainset])
-    seg = torch.LongTensor([example[2] for example in trainset])
-    if args.soft_targets:
-        soft_tgt = torch.FloatTensor([example[3] for example in trainset])
-    else:
-        soft_tgt = None
+    print("Reading dataset...")
 
+    if os.path.exists("processed_ft_dataset.pt"):
+        print(" Read from cached file.")
+        trainset = torch.load("processed_ft_dataset.pt")
+        if len(trainset) == 4:
+            src, tgt, seg, soft_tgt = trainset
+        else:
+            src, tgt, seg = trainset
+            soft_tgt = None
+    else:
+        # print(" Process and save to cached file.(Maybe slow)")
+        # trainset = read_dataset(args, args.train_path)
+        # # torch.save(trainset, "processed_ft_dataset.pt")
+        # save_dataset_as_tensors(trainset, "processed_ft_dataset.pt")
+        print("Processing dataset and saving as tensors...")
+        raw_dataset = read_dataset(args, args.train_path)
+        save_dataset_as_tensors(raw_dataset, "processed_ft_dataset.pt")
+        # 重新加载（或直接转换）
+        data = torch.load("processed_ft_dataset.pt")
+        if len(data) == 4:
+            src, tgt, seg, soft_tgt = data
+        else:
+            src, tgt, seg = data
+            soft_tgt = None
+        instances_num = src.size(0)
+
+    
+    print(f"Loaded {len(src)} training instances.")
+    # 不再有 trainset 列表！直接用 tensor
+    # 打乱顺序：生成随机索引
+    instances_num = src.size(0)
+    shuffle_idx = torch.randperm(instances_num)
+    src = src[shuffle_idx]
+    tgt = tgt[shuffle_idx]
+    seg = seg[shuffle_idx]
+    if soft_tgt is not None:
+        soft_tgt = soft_tgt[shuffle_idx]
+    # random.shuffle(trainset)
+    
+    batch_size = args.batch_size
+    src = src.to(args.device)
+    tgt = tgt.to(args.device)
+    seg = seg.to(args.device)
+    if soft_tgt is not None:
+        soft_tgt = soft_tgt.to(args.device)
+    
+    
     args.train_steps = int(instances_num * args.epochs_num / batch_size) + 1
 
     print("Batch size: ", batch_size)
@@ -313,28 +381,39 @@ def main():
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
         args.amp = amp
 
-    if torch.cuda.device_count() > 1:
-        print("{} GPUs are available. Let's use them.".format(torch.cuda.device_count()))
-        model = torch.nn.DataParallel(model)
+    # if torch.cuda.device_count() > 1:
+    #     print("{} GPUs are available. Let's use them.".format(torch.cuda.device_count()))
+    #     model = torch.nn.DataParallel(model)
     args.model = model
 
     total_loss, result, best_result = 0.0, 0.0, 0.0
+    #####
+    #train steps start
+    #####
+    # print("Start training.")
 
-    print("Start training.")
+    # for epoch in tqdm.tqdm(range(1, args.epochs_num + 1)):
+    #     model.train()
+    #     for i, (src_batch, tgt_batch, seg_batch, soft_tgt_batch) in enumerate(batch_loader(batch_size, src, tgt, seg, soft_tgt)):
+    #         print(f"Epoch: {epoch}, Step: {i+1}")
+    #         # print(f"src_batch device: {src_batch.device}")
+    #         # print(f"tgt_batch device: {tgt_batch.device}")
+    #         # print(f"seg_batch device: {seg_batch.device}")
 
-    for epoch in tqdm.tqdm(range(1, args.epochs_num + 1)):
-        model.train()
-        for i, (src_batch, tgt_batch, seg_batch, soft_tgt_batch) in enumerate(batch_loader(batch_size, src, tgt, seg, soft_tgt)):
-            loss = train_model(args, model, optimizer, scheduler, src_batch, tgt_batch, seg_batch, soft_tgt_batch)
-            total_loss += loss.item()
-            if (i + 1) % args.report_steps == 0:
-                print("Epoch id: {}, Training steps: {}, Avg loss: {:.3f}".format(epoch, i + 1, total_loss / args.report_steps))
-                total_loss = 0.0
+    #         loss = train_model(args, model, optimizer, scheduler, src_batch, tgt_batch, seg_batch, soft_tgt_batch)
+    #         total_loss += loss.item()
+    #         if (i + 1) % args.report_steps == 0:
+    #             print("Epoch id: {}, Training steps: {}, Avg loss: {:.3f}".format(epoch, i + 1, total_loss / args.report_steps))
+    #             total_loss = 0.0
 
-        result = evaluate(args, read_dataset(args, args.dev_path))
-        if result[0] > best_result:
-            best_result = result[0]
-            save_model(model, args.output_model_path)
+    #     result = evaluate(args, read_dataset(args, args.dev_path))
+    #     if result[0] > best_result:
+    #         best_result = result[0]
+    #         save_model(model, args.output_model_path)
+
+
+    ##train steps end
+
 
     # Evaluation phase.
     if args.test_path is not None:
@@ -343,7 +422,7 @@ def main():
             model.module.load_state_dict(torch.load(args.output_model_path))
         else:
             model.load_state_dict(torch.load(args.output_model_path))
-        evaluate(args, read_dataset(args, args.test_path), True)
+        evaluate(args, read_dataset(args, args.test_path), False)
 
 
 if __name__ == "__main__":

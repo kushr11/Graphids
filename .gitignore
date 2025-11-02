@@ -1,0 +1,8 @@
+*.bin
+*.zip
+datasets/
+models/
+logs/
+*.h5
+*.pth
+*.pt

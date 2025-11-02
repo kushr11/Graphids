@@ -57,7 +57,7 @@ def training_opts(parser):
                         help="Dropout.")                                                                                  
     parser.add_argument("--epochs_num", type=int, default=3,                                                              
                         help="Number of epochs.")                                                                         
-    parser.add_argument("--report_steps", type=int, default=100,                                                          
+    parser.add_argument("--report_steps", type=int, default=1,                                                          
                         help="Specific steps to print prompt.")                                                           
     parser.add_argument("--seed", type=int, default=7,                                                                    
                         help="Random seed.")
